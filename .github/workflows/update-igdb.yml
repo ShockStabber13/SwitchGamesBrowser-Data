@@ -1,0 +1,126 @@
+name: Update public IGDB catalog and covers
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 20 * * *' # 04:00 Singapore time
+
+# Public repository runners build ONLY catalog metadata and cover packs.
+# Application binaries and private source never enter this workflow.
+permissions:
+  contents: write
+
+concurrency:
+  group: public-igdb-and-covers
+  cancel-in-progress: false
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout public data repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install image builder
+        run: python -m pip install --disable-pip-version-check pillow
+
+      - name: Test public catalog generator
+        run: python -m unittest discover -s tests -p 'test_igdb*.py' -v
+
+      - name: Verify IGDB credentials configured
+        env:
+          IGDB_CLIENT_ID: ${{ secrets.IGDB_CLIENT_ID }}
+          IGDB_CLIENT_SECRET: ${{ secrets.IGDB_CLIENT_SECRET }}
+        shell: bash
+        run: |
+          if [[ -z "$IGDB_CLIENT_ID" || -z "$IGDB_CLIENT_SECRET" ]]; then
+            echo "::error::Set IGDB_CLIENT_ID and IGDB_CLIENT_SECRET in this PUBLIC DATA repository's Actions secrets (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+
+      - name: Fetch catalog into ignored staging directory
+        env:
+          IGDB_CLIENT_ID: ${{ secrets.IGDB_CLIENT_ID }}
+          IGDB_CLIENT_SECRET: ${{ secrets.IGDB_CLIENT_SECRET }}
+          IGDB_OUTPUT: data/igdb-switch-games.json
+        run: python tools/igdb_catalog.py
+
+      - name: Check catalog completeness before downloading covers
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          current = json.loads(Path("data/igdb-switch-games.json").read_text())
+          previous = json.loads(Path("igdb-switch-games.json").read_text())
+          assert isinstance(current, list) and len(current) >= max(100, int(len(previous) * 0.75)), "Unexpected catalog shrinkage"
+          assert sum(bool(x.get("mediaImages")) for x in current) >= 100, "Gallery metadata absent"
+          assert sum(bool(x.get("videoIds")) for x in current) >= 10, "Trailer metadata absent"
+          print(f"Validated {len(current)} games against {len(previous)} previously published")
+          PY
+
+      - name: Generate cover packs in staging
+        run: python tools/build_cover_pack.py
+
+      - name: Validate cover packs then copy approved files only
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          from shutil import copyfile
+
+          staging = Path("data")
+          manifest = json.loads((staging / "covers-manifest.json").read_text())
+          previous = json.loads(Path("covers-manifest.json").read_text())
+          games = json.loads((staging / "igdb-switch-games.json").read_text())
+          packs = manifest.get("packs", {})
+          assert manifest.get("schemaVersion") == 1 and len(packs) == 16
+          assert manifest.get("catalogGames") == len(games)
+          assert manifest.get("imageCount", 0) >= max(100, int(previous.get("imageCount", 0) * 0.75)), "Too many covers missing"
+          for info in packs.values():
+              name = info["file"]
+              assert name.startswith("covers-") and name.endswith(".pack")
+              blob = (staging / name).read_bytes()
+              assert len(blob) == info["bytes"] and hashlib.sha256(blob).hexdigest() == info["sha256"], name
+          for name in ["igdb-switch-games.json", "covers-manifest.json"]:
+              copyfile(staging / name, name)
+          for info in packs.values():
+              name = info["file"]
+              copyfile(staging / name, name)
+          print(f"Validated and staged {len(games)} games, {manifest['imageCount']} covers")
+          PY
+
+      - name: Publish only public catalog metadata and cover packs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- igdb-switch-games.json covers-manifest.json ':(glob)covers-*.pack'
+          if git diff --cached --quiet; then
+            echo "IGDB catalog and covers unchanged."
+            exit 0
+          fi
+          git commit -m "Refresh public IGDB Switch catalog and covers"
+          for attempt in 1 2 3 4; do
+            if git push origin HEAD:main; then
+              echo "Published updated public catalog."
+              exit 0
+            fi
+            echo "Concurrent public catalog commit; rebasing ($attempt/4)"
+            git fetch origin main
+            git rebase origin/main
+            sleep 3
+          done
+          echo "::error::Failed to publish catalog after four attempts."
+          exit 1
