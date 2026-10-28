@@ -1,0 +1,8 @@
+# Generated catalog staging and local credentials must never be committed.
+data/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+*.part
