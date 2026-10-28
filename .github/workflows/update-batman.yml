@@ -1,0 +1,79 @@
+name: Update public Batman catalog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 21 * * *' # 05:30 Singapore time
+
+# This job uses only public site listings and the already-public catalog.
+# No private source checkout, credentials or game download links.
+permissions:
+  contents: write
+
+concurrency:
+  group: public-batman-catalog
+  cancel-in-progress: false
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout public data repo
+        uses: actions/checkout@v4
+
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify full-scan rejection and title parsing
+        run: python tests/test_notultranx_catalog.py
+
+      - name: Generate catalog from public metadata and existing public seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          python tools/build_notultranx_catalog.py \
+            --seed notultranx-catalog.json \
+            --output data/notultranx-catalog.json \
+            --scan-site --max-pages 96
+
+      - name: Validate catalog and publish only approved JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          old = json.loads(Path("notultranx-catalog.json").read_text())
+          new = json.loads(Path("data/notultranx-catalog.json").read_text())
+          old_games = old.get("games", [])
+          new_games = new.get("games", [])
+          assert new.get("schemaVersion") == 1
+          assert len(new_games) >= max(20, len(old_games)), "Incomplete catalog: refusing to replace public data"
+          assert all(isinstance(row.get("id"), str) and len(row["id"]) == 16 for row in new_games)
+          assert not any(any(key.lower() in ("url", "password", "token", "apikey", "api_key", "downloadlink") for key in row) for row in new_games), "Unexpected private fields"
+          Path("notultranx-catalog.json").write_bytes(Path("data/notultranx-catalog.json").read_bytes())
+          print(f"Verified {len(new_games)} public catalog entries")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- notultranx-catalog.json
+          if git diff --cached --quiet; then
+            echo "Batman catalog unchanged."
+            exit 0
+          fi
+          git commit -m "Refresh public Batman offline catalog"
+          for attempt in 1 2 3 4; do
+            if git push origin HEAD:main; then
+              echo "Published updated Batman catalog."
+              exit 0
+            fi
+            git fetch origin main
+            git rebase origin/main
+            sleep 3
+          done
+          echo "::error::Failed to publish Batman catalog after four attempts."
+          exit 1
