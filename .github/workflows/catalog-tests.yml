@@ -1,0 +1,43 @@
+name: Validate public catalog generators
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/**'
+      - 'tests/**'
+      - '.github/workflows/**'
+
+# Pure offline tests. Never use or expose IGDB secrets in PR or test jobs.
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test IGDB base-game filtering and metadata
+        run: python -m unittest discover -s tests -p 'test_igdb*.py' -v
+      - name: Test Batman catalog scan and failure safeguards
+        run: python tests/test_notultranx_catalog.py
+      - name: Verify public workflow separation
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          workflows = Path(".github/workflows")
+          for path in workflows.glob("*.yml"):
+              content = path.read_text()
+              assert "SwitchGamesBrowser-Data" not in content or "checkout" not in content, path
+              assert "DATA_REPO_TOKEN" not in content, path
+          assert Path("tools/igdb_catalog.py").is_file()
+          assert Path("tools/build_cover_pack.py").is_file()
+          assert Path("tools/build_notultranx_catalog.py").is_file()
+          print("Public generators require no private code checkout or publication token")
+          PY
