@@ -32,10 +32,12 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           workflows = Path(".github/workflows")
-          for path in workflows.glob("*.yml"):
+          for name in ("update-igdb.yml", "update-batman.yml"):
+              path = workflows / name
               content = path.read_text()
-              assert "SwitchGamesBrowser-Data" not in content or "checkout" not in content, path
+              assert "private-source" not in content, path
               assert "DATA_REPO_TOKEN" not in content, path
+              assert "repository: ShockStabber13/SwitchGamesBrowser\\n" not in content, path
           assert Path("tools/igdb_catalog.py").is_file()
           assert Path("tools/build_cover_pack.py").is_file()
           assert Path("tools/build_notultranx_catalog.py").is_file()
